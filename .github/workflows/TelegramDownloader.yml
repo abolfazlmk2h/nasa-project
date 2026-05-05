@@ -28,7 +28,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y curl jq zip openssl aria2
 
-      - name: 📡 Get direct link and fix spaces
+      - name: 📡 Get direct link
         id: get_link
         run: |
           TELEGRAM_LINK="${{ github.event.inputs.telegram_link }}"
@@ -69,8 +69,6 @@ jobs:
 
           ENCODED_URL=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$ORIGINAL_URL")
 
-          RELAY_URL="${CF_WORKER_URL}?secret=${CF_SECRET_KEY}&url=${ENCODED_URL}"
-
           mkdir -p downloads
 
           BASE_NAME="${ORIGINAL_NAME%.*}"
@@ -97,7 +95,20 @@ jobs:
           echo "⬇️ Downloading via relay: $FINAL_NAME"
           echo "═══════════════════════════════════════════════════════════════"
 
-          echo "$RELAY_URL" > /tmp/relay_url.txt
+          printf '%s' "$CF_WORKER_URL" > /tmp/worker.txt
+          printf '%s' "$CF_SECRET_KEY" > /tmp/secret.txt
+          printf '%s' "$ENCODED_URL" > /tmp/encoded.txt
+
+          python3 - <<'PYEOF'
+import os
+
+worker = open('/tmp/worker.txt').read().strip()
+secret = open('/tmp/secret.txt').read().strip()
+encoded = open('/tmp/encoded.txt').read().strip()
+
+full_url = f"{worker}?secret={secret}&url={encoded}"
+open('/tmp/relay_url.txt', 'w').write(full_url + '\n')
+PYEOF
 
           aria2c \
             --split=16 \
@@ -112,11 +123,11 @@ jobs:
             --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36" \
             --dir="downloads" \
             --out="$FINAL_NAME" \
-            "$(cat /tmp/relay_url.txt)"
-
-          rm -f /tmp/relay_url.txt
+            --input-file=/tmp/relay_url.txt
 
           ARIA_EXIT=$?
+
+          rm -f /tmp/relay_url.txt /tmp/worker.txt /tmp/secret.txt /tmp/encoded.txt
 
           if [ $ARIA_EXIT -ne 0 ]; then
             echo "❌ Download failed (aria2c exit code: $ARIA_EXIT)!"
@@ -158,7 +169,7 @@ jobs:
             cd ..
           fi
 
-      - name: 🔄 Fix filenames (remove Persian/Arabic, special chars)
+      - name: 🔄 Fix filenames
         run: |
           cd downloads
 
@@ -186,7 +197,7 @@ jobs:
 
           cd ..
 
-      - name: 📤 Upload to GitHub (1 file at a time)
+      - name: 📤 Upload to GitHub
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
