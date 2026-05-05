@@ -50,7 +50,6 @@ jobs:
             exit 1
           fi
           
-          # Convert spaces to dash in URL
           CORRECTED_URL=$(echo "$RAW_URL" | sed 's/%20/-/g' | sed 's/ /-/g')
           
           echo "✅ Direct link received!"
@@ -67,7 +66,6 @@ jobs:
           
           mkdir -p downloads
           
-          # Check if file already exists
           BASE_NAME="${ORIGINAL_NAME%.*}"
           EXT="${ORIGINAL_NAME##*.}"
           if [[ "$EXT" == "$ORIGINAL_NAME" ]]; then
@@ -79,7 +77,6 @@ jobs:
           FINAL_NAME="$ORIGINAL_NAME"
           COUNTER=1
           
-          # Keep checking and increment counter until unique name found
           while [ -f "downloads/$FINAL_NAME" ]; do
             FINAL_NAME="${BASE_NAME}_${COUNTER}${EXT}"
             COUNTER=$((COUNTER + 1))
@@ -93,17 +90,50 @@ jobs:
           echo "⬇️ Downloading: $FINAL_NAME"
           echo "═══════════════════════════════════════════════════════════════"
           
-          curl -L --progress-bar \
-            --http1.1 \
-            --max-time 7200 \
-            --retry 10 \
-            --retry-delay 10 \
-            --retry-all-errors \
-            -C - \
-            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-            -H "Referer: https://telegramdownloader.net/" \
-            -o "downloads/$FINAL_NAME" \
-            "$URL"
+          MAX_ATTEMPTS=20
+          ATTEMPT=0
+          EXIT_CODE=1
+          
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "   ⏳ Attempt $ATTEMPT/$MAX_ATTEMPTS..."
+            
+            RESUME_FLAG=""
+            if [ -f "downloads/$FINAL_NAME" ]; then
+              CURRENT_SIZE=$(stat -c%s "downloads/$FINAL_NAME")
+              if [ "$CURRENT_SIZE" -gt 0 ]; then
+                echo "   📌 Resuming from byte $CURRENT_SIZE"
+                RESUME_FLAG="-C $CURRENT_SIZE"
+              fi
+            fi
+            
+            curl -L --progress-bar \
+              --http1.1 \
+              --max-time 7200 \
+              --connect-timeout 30 \
+              --speed-limit 1024 \
+              --speed-time 60 \
+              $RESUME_FLAG \
+              -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+              -H "Referer: https://telegramdownloader.net/" \
+              -o "downloads/$FINAL_NAME" \
+              "$URL"
+            
+            EXIT_CODE=$?
+            
+            if [ $EXIT_CODE -eq 0 ]; then
+              echo "   ✅ Download finished successfully!"
+              break
+            fi
+            
+            echo "   ⚠️ Transfer interrupted (exit $EXIT_CODE), retrying in 10s..."
+            sleep 10
+          done
+          
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "❌ Download failed after $MAX_ATTEMPTS attempts"
+            exit 1
+          fi
           
           if [ ! -f "downloads/$FINAL_NAME" ]; then
             echo "❌ Download failed!"
@@ -177,7 +207,6 @@ jobs:
             exit 1
           fi
           
-          # Get list of new files only (not already in git)
           NEW_FILES=()
           for file in downloads/*; do
             filename=$(basename "$file")
@@ -199,7 +228,6 @@ jobs:
           echo "📦 Total new files to upload: $TOTAL"
           echo "═══════════════════════════════════════════════════════════════"
           
-          # Upload ONE file at a time
           for (( i=0; i<TOTAL; i++ )); do
             echo ""
             echo "🚀 Uploading file $((i+1)) of $TOTAL: ${NEW_FILES[$i]}"
