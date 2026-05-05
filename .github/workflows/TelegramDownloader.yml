@@ -26,7 +26,7 @@ jobs:
       - name: 🔧 Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl jq zip openssl
+          sudo apt-get install -y curl jq zip openssl aria2
 
       - name: 📡 Get direct link and fix spaces
         id: get_link
@@ -90,53 +90,31 @@ jobs:
           echo "⬇️ Downloading: $FINAL_NAME"
           echo "═══════════════════════════════════════════════════════════════"
           
-          MAX_ATTEMPTS=20
-          ATTEMPT=0
-          EXIT_CODE=1
+          aria2c \
+            --continue=true \
+            --max-tries=50 \
+            --retry-wait=10 \
+            --split=1 \
+            --max-connection-per-server=1 \
+            --min-split-size=1M \
+            --timeout=60 \
+            --connect-timeout=30 \
+            --max-file-not-found=5 \
+            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            --referer="https://telegramdownloader.net/" \
+            --dir="downloads" \
+            --out="$FINAL_NAME" \
+            "$URL"
           
-          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-            ATTEMPT=$((ATTEMPT + 1))
-            echo "   ⏳ Attempt $ATTEMPT/$MAX_ATTEMPTS..."
-            
-            RESUME_FLAG=""
-            if [ -f "downloads/$FINAL_NAME" ]; then
-              CURRENT_SIZE=$(stat -c%s "downloads/$FINAL_NAME")
-              if [ "$CURRENT_SIZE" -gt 0 ]; then
-                echo "   📌 Resuming from byte $CURRENT_SIZE"
-                RESUME_FLAG="-C $CURRENT_SIZE"
-              fi
-            fi
-            
-            curl -L --progress-bar \
-              --http1.1 \
-              --max-time 7200 \
-              --connect-timeout 30 \
-              --speed-limit 1024 \
-              --speed-time 60 \
-              $RESUME_FLAG \
-              -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-              -H "Referer: https://telegramdownloader.net/" \
-              -o "downloads/$FINAL_NAME" \
-              "$URL"
-            
-            EXIT_CODE=$?
-            
-            if [ $EXIT_CODE -eq 0 ]; then
-              echo "   ✅ Download finished successfully!"
-              break
-            fi
-            
-            echo "   ⚠️ Transfer interrupted (exit $EXIT_CODE), retrying in 10s..."
-            sleep 10
-          done
+          EXIT_CODE=$?
           
           if [ $EXIT_CODE -ne 0 ]; then
-            echo "❌ Download failed after $MAX_ATTEMPTS attempts"
+            echo "❌ Download failed after all retries (exit $EXIT_CODE)"
             exit 1
           fi
           
           if [ ! -f "downloads/$FINAL_NAME" ]; then
-            echo "❌ Download failed!"
+            echo "❌ File not found after download!"
             exit 1
           fi
           
