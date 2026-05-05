@@ -67,7 +67,8 @@ jobs:
           ORIGINAL_URL="${{ steps.get_link.outputs.download_url }}"
           ORIGINAL_NAME="${{ steps.get_link.outputs.original_name }}"
 
-          ENCODED_URL=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$ORIGINAL_URL', safe=''))")
+          ENCODED_URL=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$ORIGINAL_URL")
+
           RELAY_URL="${CF_WORKER_URL}?secret=${CF_SECRET_KEY}&url=${ENCODED_URL}"
 
           mkdir -p downloads
@@ -96,6 +97,8 @@ jobs:
           echo "⬇️ Downloading via relay: $FINAL_NAME"
           echo "═══════════════════════════════════════════════════════════════"
 
+          echo "$RELAY_URL" > /tmp/relay_url.txt
+
           aria2c \
             --split=16 \
             --max-connection-per-server=16 \
@@ -109,7 +112,9 @@ jobs:
             --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36" \
             --dir="downloads" \
             --out="$FINAL_NAME" \
-            "$RELAY_URL"
+            "$(cat /tmp/relay_url.txt)"
+
+          rm -f /tmp/relay_url.txt
 
           ARIA_EXIT=$?
 
