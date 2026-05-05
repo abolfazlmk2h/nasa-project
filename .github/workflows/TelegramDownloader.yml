@@ -26,7 +26,7 @@ jobs:
       - name: 🔧 Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl jq zip openssl aria2
+          sudo apt-get install -y curl jq zip openssl
 
       - name: 📡 Get direct link and fix spaces
         id: get_link
@@ -90,28 +90,56 @@ jobs:
           echo "⬇️ Downloading: $FINAL_NAME"
           echo "═══════════════════════════════════════════════════════════════"
           
-          aria2c \
-            --continue=true \
-            --max-tries=50 \
-            --retry-wait=10 \
-            --split=1 \
-            --max-connection-per-server=1 \
-            --min-split-size=1M \
-            --timeout=60 \
-            --connect-timeout=30 \
-            --max-file-not-found=5 \
-            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-            --referer="https://telegramdownloader.net/" \
-            --dir="downloads" \
-            --out="$FINAL_NAME" \
-            "$URL"
+          MAX_ATTEMPTS=50
+          ATTEMPT=0
           
-          EXIT_CODE=$?
-          
-          if [ $EXIT_CODE -ne 0 ]; then
-            echo "❌ Download failed after all retries (exit $EXIT_CODE)"
-            exit 1
-          fi
+          until [ $ATTEMPT -ge $MAX_ATTEMPTS ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            
+            RESUME_OFFSET=0
+            if [ -f "downloads/$FINAL_NAME" ]; then
+              RESUME_OFFSET=$(stat -c%s "downloads/$FINAL_NAME" 2>/dev/null || echo 0)
+            fi
+            
+            echo "   ⏳ Attempt $ATTEMPT/$MAX_ATTEMPTS — offset: ${RESUME_OFFSET} bytes"
+            
+            if [ "$RESUME_OFFSET" -gt 0 ]; then
+              RESUME_ARG="-C ${RESUME_OFFSET}"
+            else
+              RESUME_ARG=""
+            fi
+            
+            curl -L \
+              --http1.1 \
+              --max-time 300 \
+              --connect-timeout 30 \
+              --speed-limit 512 \
+              --speed-time 30 \
+              --no-keepalive \
+              $RESUME_ARG \
+              -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+              -H "Referer: https://telegramdownloader.net/" \
+              -H "Range: bytes=${RESUME_OFFSET}-" \
+              -o "downloads/$FINAL_NAME" \
+              "$URL"
+            
+            CURL_EXIT=$?
+            
+            CURRENT_SIZE=0
+            if [ -f "downloads/$FINAL_NAME" ]; then
+              CURRENT_SIZE=$(stat -c%s "downloads/$FINAL_NAME" 2>/dev/null || echo 0)
+            fi
+            
+            echo "   📊 Downloaded so far: $((CURRENT_SIZE / 1024 / 1024)) MB"
+            
+            if [ $CURL_EXIT -eq 0 ]; then
+              echo "   ✅ curl exited cleanly — download complete!"
+              break
+            fi
+            
+            echo "   ⚠️ curl exited with code $CURL_EXIT, will resume in 5s..."
+            sleep 5
+          done
           
           if [ ! -f "downloads/$FINAL_NAME" ]; then
             echo "❌ File not found after download!"
@@ -120,8 +148,9 @@ jobs:
           
           SIZE=$(stat -c%s "downloads/$FINAL_NAME")
           
-          if [ "$SIZE" -lt 1024 ]; then
-            echo "❌ ERROR: Invalid file (${SIZE} bytes)"
+          if [ "$SIZE" -lt 1048576 ]; then
+            echo "❌ ERROR: File too small (${SIZE} bytes) — likely corrupt or failed"
+            cat "downloads/$FINAL_NAME" 2>/dev/null || true
             rm "downloads/$FINAL_NAME"
             exit 1
           fi
