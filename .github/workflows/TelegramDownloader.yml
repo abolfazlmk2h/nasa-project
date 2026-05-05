@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    
+
     steps:
       - name: 📂 Clone repository
         uses: actions/checkout@v4
@@ -34,30 +34,17 @@ jobs:
         id: get_link
         run: |
           TELEGRAM_LINK="${{ github.event.inputs.telegram_link }}"
-          
-          echo "═══════════════════════════════════════════════════════════════"
-          echo "🔗 Telegram link: $TELEGRAM_LINK"
-          echo "═══════════════════════════════════════════════════════════════"
-          
           RESPONSE=$(curl -s -X POST \
             -H "User-Agent: Mozilla/5.0" \
             -d "telegram_link=$TELEGRAM_LINK" \
             https://telegramdownloader.net/proxy.php)
-          
           RAW_URL=$(echo "$RESPONSE" | jq -r '.data.data.link')
           FILE_NAME=$(echo "$RESPONSE" | jq -r '.data.data.file_name')
-          
           if [ -z "$RAW_URL" ] || [ "$RAW_URL" = "null" ]; then
             echo "❌ Error: Could not get download link!"
             exit 1
           fi
-          
-          # Convert spaces to dash in URL
           CORRECTED_URL=$(echo "$RAW_URL" | sed 's/%20/-/g' | sed 's/ /-/g')
-          
-          echo "✅ Direct link received!"
-          echo "📄 Original filename: $FILE_NAME"
-          
           echo "download_url=$CORRECTED_URL" >> $GITHUB_OUTPUT
           echo "original_name=$FILE_NAME" >> $GITHUB_OUTPUT
 
@@ -66,10 +53,7 @@ jobs:
         run: |
           URL="${{ steps.get_link.outputs.download_url }}"
           ORIGINAL_NAME="${{ steps.get_link.outputs.original_name }}"
-          
           mkdir -p downloads
-          
-          # Check if file already exists
           BASE_NAME="${ORIGINAL_NAME%.*}"
           EXT="${ORIGINAL_NAME##*.}"
           if [[ "$EXT" == "$ORIGINAL_NAME" ]]; then
@@ -77,25 +61,19 @@ jobs:
           else
             EXT=".$EXT"
           fi
-          
           FINAL_NAME="$ORIGINAL_NAME"
           COUNTER=1
-          
-          # Keep checking and increment counter until unique name found
           while [ -f "downloads/$FINAL_NAME" ]; do
             FINAL_NAME="${BASE_NAME}_${COUNTER}${EXT}"
             COUNTER=$((COUNTER + 1))
           done
-          
           if [ "$FINAL_NAME" != "$ORIGINAL_NAME" ]; then
             echo "⚠️ File already exists! Renaming to: $FINAL_NAME"
           fi
-          
-          echo "═══════════════════════════════════════════════════════════════"
           echo "⬇️ Downloading: $FINAL_NAME"
-          echo "═══════════════════════════════════════════════════════════════"
-          
           curl -L --progress-bar \
+            --http1.1 \
+            --retry-all-errors \
             --max-time 7200 \
             --retry 10 \
             --retry-delay 10 \
@@ -104,20 +82,16 @@ jobs:
             -H "Referer: https://telegramdownloader.net/" \
             -o "downloads/$FINAL_NAME" \
             "$URL"
-          
           if [ ! -f "downloads/$FINAL_NAME" ]; then
             echo "❌ Download failed!"
             exit 1
           fi
-          
           SIZE=$(stat -c%s "downloads/$FINAL_NAME")
-          
           if [ "$SIZE" -lt 1024 ]; then
             echo "❌ ERROR: Invalid file (${SIZE} bytes)"
             rm "downloads/$FINAL_NAME"
             exit 1
           fi
-          
           SIZE_MB=$((SIZE / 1024 / 1024))
           echo "✅ Download complete! Size: ${SIZE_MB} MB"
           echo "file_size=$SIZE" >> $GITHUB_OUTPUT
@@ -130,7 +104,6 @@ jobs:
           FILENAME="${{ steps.download.outputs.downloaded_name }}"
           FILE_SIZE="${{ steps.download.outputs.file_size }}"
           LIMIT=$((THRESHOLD * 1024 * 1024))
-          
           if [ -n "$FILE_SIZE" ] && [ "$FILE_SIZE" -gt "$LIMIT" ]; then
             echo "✂️ Splitting into ${THRESHOLD}MB parts..."
             cd downloads
@@ -139,45 +112,36 @@ jobs:
             cd ..
           fi
 
-      - name: 🔄 Fix filenames (remove Persian/Arabic, special chars)
+      - name: 🔄 Fix filenames
         run: |
           cd downloads
-          
           for file in *; do
             [ -e "$file" ] || continue
-            
             EXT="${file##*.}"
             if [[ "$EXT" == "$file" ]]; then
               EXT="bin"
             fi
-            
             if [[ "$file" =~ [^[:ascii:]] ]]; then
               RANDOM_NAME=$(openssl rand -hex 8)
               NEW_NAME="${RANDOM_NAME}.${EXT}"
-              echo "   🌐 Renaming: $file -> $NEW_NAME"
               mv "$file" "$NEW_NAME"
             else
               CLEAN_NAME=$(echo "$file" | sed 's/[^a-zA-Z0-9._-]/_/g' | sed 's/__*/_/g')
               if [ "$file" != "$CLEAN_NAME" ]; then
-                echo "   📝 Cleaning: $file -> $CLEAN_NAME"
                 mv "$file" "$CLEAN_NAME"
               fi
             fi
           done
-          
           cd ..
 
-      - name: 📤 Upload to GitHub (Batch upload - 1 file at a time)
+      - name: 📤 Upload to GitHub
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
           if [ ! -d "downloads" ] || [ -z "$(ls -A downloads 2>/dev/null)" ]; then
             echo "⚠️ No files to upload!"
             exit 1
           fi
-          
-          # Get list of new files only (not already in git)
           NEW_FILES=()
           for file in downloads/*; do
             filename=$(basename "$file")
@@ -187,26 +151,15 @@ jobs:
               echo "⏭️ Skipping already uploaded file: $filename"
             fi
           done
-          
           TOTAL=${#NEW_FILES[@]}
-          
           if [ "$TOTAL" -eq 0 ]; then
             echo "✅ No new files to upload!"
             exit 0
           fi
-          
-          echo "═══════════════════════════════════════════════════════════════"
-          echo "📦 Total new files to upload: $TOTAL"
-          echo "═══════════════════════════════════════════════════════════════"
-          
-          # Upload ONE file at a time
           for (( i=0; i<TOTAL; i++ )); do
-            echo ""
             echo "🚀 Uploading file $((i+1)) of $TOTAL: ${NEW_FILES[$i]}"
-            
             git add "downloads/${NEW_FILES[$i]}"
             git commit -m "Add ${NEW_FILES[$i]} [skip ci]"
-            
             for attempt in 1 2 3; do
               if git push origin main 2>&1; then
                 echo "   ✅ Uploaded successfully"
@@ -222,22 +175,12 @@ jobs:
                 fi
               fi
             done
-            
             sleep 2
           done
-          
-          echo ""
-          echo "═══════════════════════════════════════════════════════════════"
-          echo "🎉 All $TOTAL new files uploaded successfully!"
-          echo ""
-          echo "📂 Uploaded files:"
-          ls -lh downloads/
-          echo "═══════════════════════════════════════════════════════════════"
 
       - name: 📋 Final report
         if: always()
         run: |
-          echo ""
           echo "┌─────────────────────────────────────────────────────────────┐"
           echo "│                   Download Final Report                    │"
           echo "├─────────────────────────────────────────────────────────────┤"
