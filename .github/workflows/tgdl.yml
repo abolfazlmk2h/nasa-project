@@ -73,10 +73,10 @@ jobs:
           RAW_URL=""
           FILE_NAME=""
 
-          if [ "$RESPONSE" != "FAILED" ] && [ -n "$RESPONSE" ]; then
-            RAW_URL=$(echo "$RESPONSE" | jq -r '.data.data.link // empty' 2>/dev/null)
-            FILE_NAME=$(echo "$RESPONSE" | jq -r '.data.data.file_name // empty' 2>/dev/null)
-          fi
+          
+          RAW_URL=$(echo "$RESPONSE" | jq -r '.data.data.link // empty' 2>/dev/null)
+          FILE_NAME=$(echo "$RESPONSE" | jq -r '.data.data.file_name // empty' 2>/dev/null)
+          
 
           # ─── Method 2: tgsave style scraper ─────────────────────────────
           if [ -z "$RAW_URL" ] || [ "$RAW_URL" = "null" ]; then
