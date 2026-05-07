@@ -27,7 +27,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
-      - name: ⚙️ Configure Git for large files
+      - name: ⚙️ Setup git & dependencies
         run: |
           git config --global http.postBuffer 524288000
           git config --global http.maxRequestBuffer 100M
@@ -37,257 +37,159 @@ jobs:
           git config --global pack.threads 1
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          echo "✅ Git configured for large file handling"
 
-      - name: 🔧 Install dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y curl jq openssl bc p7zip-full python3 aria2
-          echo "✅ Dependencies installed"
-          echo ""
-          echo "Tool versions:"
-          curl --version | head -1
-          jq --version
-          7z i 2>/dev/null | head -2
+          MISSING=""
+          command -v aria2c >/dev/null 2>&1 || MISSING="$MISSING aria2"
+          command -v 7z     >/dev/null 2>&1 || MISSING="$MISSING p7zip-full"
+          if [ -n "$MISSING" ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y $MISSING
+          fi
+
+          pip install -q yt-dlp --break-system-packages
+
+          echo "✅ Ready"
           aria2c --version | head -1
+          yt-dlp --version
 
-      - name: 🔍 Resolve & Download
+      - name: ⬇️ Download
         id: download
         run: |
           TELEGRAM_LINK="${{ github.event.inputs.telegram_link }}"
 
           echo "═══════════════════════════════════════════════════════════════"
-          echo "🔗 Input link: $TELEGRAM_LINK"
+          echo "🔗 Link: $TELEGRAM_LINK"
           echo "═══════════════════════════════════════════════════════════════"
-
-          PAGE_HTML=$(curl -sL --max-time 20 \
-            -H "User-Agent: TelegramBot (like TwitterBot)" \
-            "$TELEGRAM_LINK" 2>/dev/null || echo "")
-          
-          RAW_URL=""
-          
-          VIDEO_URL=$(echo "$PAGE_HTML" | grep -oP '(?<=content=")[^"]+\.(mp4|mov|avi|mkv)[^"]*' | head -1 || echo "")
-          if [ -n "$VIDEO_URL" ]; then
-            RAW_URL="$VIDEO_URL"
-            echo "✅ Found video URL via og:video"
-          fi
-          
-          if [ -z "$RAW_URL" ]; then
-            AUDIO_URL=$(echo "$PAGE_HTML" | grep -oP '(?<=content=")[^"]+\.(mp3|m4a|ogg|flac|wav)[^"]*' | head -1 || echo "")
-            if [ -n "$AUDIO_URL" ]; then
-              RAW_URL="$AUDIO_URL"
-              echo "✅ Found audio URL"
-            fi
-          fi
-          
-          if [ -z "$RAW_URL" ]; then
-            DOC_URL=$(echo "$PAGE_HTML" | grep -oP '(?<=content=")[^"]+\.(pdf|zip|rar|7z)[^"]*' | head -1 || echo "")
-            if [ -n "$DOC_URL" ]; then
-              RAW_URL="$DOC_URL"
-              echo "✅ Found document URL"
-            fi
-          fi
-          
-          if [ -z "$RAW_URL" ]; then
-            CDN_URLS=$(echo "$PAGE_HTML" | grep -oP 'https://cdn[0-9]*\.telesco\.pe/file/[^"]+' || echo "")
-            while IFS= read -r CANDIDATE; do
-              [ -z "$CANDIDATE" ] && continue
-              CT=$(curl -sI --max-time 10 \
-                -H "User-Agent: Mozilla/5.0" \
-                -H "Referer: https://t.me/" \
-                "$CANDIDATE" 2>/dev/null | grep -i "content-type:" | head -1 | tr -d '\r')
-              if echo "$CT" | grep -qiE "video|audio|octet-stream|zip|pdf|rar|7z"; then
-                RAW_URL="$CANDIDATE"
-                echo "✅ Found non-image CDN URL via content-type check"
-                break
-              else
-                echo "⚠️  Skipping thumbnail/image CDN URL"
-              fi
-            done <<< "$CDN_URLS"
-          fi
-          
-          if [ -z "$RAW_URL" ]; then
-            echo "⚠️  CDN scrape found no video — trying telegramdownloader.net API..."
-            RESPONSE=$(curl -s --max-time 30 -X POST \
-              -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-              -H "Content-Type: application/x-www-form-urlencoded" \
-              -d "telegram_link=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$TELEGRAM_LINK")" \
-              https://telegramdownloader.net/proxy.php 2>/dev/null || echo "FAILED")
-          
-            if [ "$RESPONSE" != "FAILED" ] && [ -n "$RESPONSE" ]; then
-              API_URL=$(echo "$RESPONSE" | jq -r '.data.data.link // empty' 2>/dev/null)
-              if [ -n "$API_URL" ] && [ "$API_URL" != "null" ]; then
-                CT=$(curl -sI --max-time 10 \
-                  -H "User-Agent: Mozilla/5.0" \
-                  "$API_URL" 2>/dev/null | grep -i "content-type:" | head -1 | tr -d '\r')
-                if echo "$CT" | grep -qiE "video|audio|octet-stream|zip|pdf|rar|7z|mp4"; then
-                  RAW_URL="$API_URL"
-                  FILE_NAME=$(echo "$RESPONSE" | jq -r '.data.data.file_name // empty' 2>/dev/null)
-                  echo "✅ telegramdownloader.net returned a valid video URL"
-                else
-                  echo "⚠️  telegramdownloader.net also returned an image, skipping"
-                fi
-              fi
-            fi
-          fi
-          
-          if [ -z "$RAW_URL" ]; then
-            echo "⚠️  All methods failed — trying tgsave.com..."
-            RESPONSE2=$(curl -s --max-time 30 -X POST \
-              -H "User-Agent: Mozilla/5.0" \
-              -H "Content-Type: application/json" \
-              -d "{\"url\":\"$TELEGRAM_LINK\"}" \
-              https://api.tgsave.com/download 2>/dev/null || echo "FAILED")
-          
-            if [ "$RESPONSE2" != "FAILED" ] && [ -n "$RESPONSE2" ]; then
-              API_URL2=$(echo "$RESPONSE2" | jq -r '.url // .link // .download_url // empty' 2>/dev/null)
-              if [ -n "$API_URL2" ] && [ "$API_URL2" != "null" ]; then
-                RAW_URL="$API_URL2"
-                FILE_NAME=$(echo "$RESPONSE2" | jq -r '.filename // .file_name // .name // empty' 2>/dev/null)
-                echo "✅ tgsave.com returned a URL"
-              fi
-            fi
-          fi
-
-          CONTENT_TYPE=$(curl -sI --max-time 10 \
-            -H "User-Agent: Mozilla/5.0" \
-            -H "Referer: https://t.me/" \
-            "$RAW_URL" 2>/dev/null | grep -i "content-type:" | head -1 | tr -d '\r')
-          
-          EXT_MAP=$(python3 -c "
-          import sys
-          ct = sys.argv[1].lower()
-          m = {
-            'video/mp4':'mp4','video/webm':'webm','video/x-matroska':'mkv',
-            'video/quicktime':'mov','video/x-msvideo':'avi',
-            'audio/mpeg':'mp3','audio/mp4':'m4a','audio/ogg':'ogg',
-            'audio/flac':'flac','audio/wav':'wav',
-            'image/jpeg':'jpg','image/png':'png','image/gif':'gif','image/webp':'webp',
-            'application/pdf':'pdf','application/zip':'zip',
-            'application/x-7z-compressed':'7z','application/x-rar-compressed':'rar',
-          }
-          for k,v in m.items():
-            if k in ct:
-              print(v); exit()
-          print('bin')
-          " "$CONTENT_TYPE")
-          
-          FILE_NAME="telegram_$(date +%s).${EXT_MAP}"
-
-          ENCODED_URL=$(python3 -c "
-          import sys, urllib.parse
-          url = sys.argv[1]
-          if '?' in url:
-              path_part, rest = url.split('?', 1)
-              rest = '?' + rest
-          elif '#' in url:
-              path_part, rest = url.split('#', 1)
-              rest = '#' + rest
-          else:
-              path_part, rest = url, ''
-          encoded_path = urllib.parse.quote(path_part, safe=':/@.-_~!\$&()*+,;=')
-          print(encoded_path + rest)
-          " "$RAW_URL")
-
-          echo ""
-          echo "✅ Link resolved!"
-          echo "📄 Filename : $FILE_NAME"
-          echo "🔗 URL      : $ENCODED_URL"
-
-          sanitize_name() {
-            echo "$1" \
-              | iconv -f utf-8 -t ascii//TRANSLIT 2>/dev/null \
-              | sed 's/ /-/g' | sed 's/　/-/g' \
-              | sed 's/[^a-zA-Z0-9._-]/_/g' \
-              | sed 's/__*/_/g' \
-              | sed 's/^[._-]*//' \
-              | tr -s '-'
-          }
-
-          SAFE_NAME=$(sanitize_name "$FILE_NAME")
-          [ -z "$SAFE_NAME" ] && SAFE_NAME="telegram_file_$(date +%s).bin"
 
           BACKUP_DIR="/tmp/tg_backup_$$"
           mkdir -p "$BACKUP_DIR"
           echo "$BACKUP_DIR" > /tmp/backup_dir_path.txt
           mkdir -p tmp_downloads
 
-          BASE_NAME="${SAFE_NAME%.*}"
-          EXT="${SAFE_NAME##*.}"
-          [ "$EXT" = "$SAFE_NAME" ] && EXT="bin"
-
-          FINAL_NAME="$SAFE_NAME"
-          COUNTER=1
-          while [ -f "tmp_downloads/$FINAL_NAME" ]; do
-            FINAL_NAME="${BASE_NAME}_${COUNTER}.${EXT}"
-            COUNTER=$((COUNTER + 1))
-          done
-
-          echo "═══════════════════════════════════════════════════════════════"
-          echo "⬇️  Downloading : $FINAL_NAME"
-          echo "═══════════════════════════════════════════════════════════════"
-
           DOWNLOAD_OK=false
 
-          echo "🔄 Attempt 1/3 — aria2c (16 connections)..."
-          if aria2c \
-              --out="$FINAL_NAME" \
-              --dir="tmp_downloads" \
-              --split=16 \
-              --max-connection-per-server=16 \
-              --min-split-size=2M \
-              --max-tries=5 \
-              --retry-wait=5 \
-              --timeout=60 \
-              --connect-timeout=30 \
-              --header="User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-              --header="Referer: https://t.me/" \
-              --allow-overwrite=true \
-              --auto-file-renaming=false \
-              "$ENCODED_URL"; then
+          echo "🔄 Attempt 1 — yt-dlp..."
+          if yt-dlp \
+              --no-warnings \
+              --output "tmp_downloads/%(title)s.%(ext)s" \
+              --merge-output-format mp4 \
+              --no-playlist \
+              "$TELEGRAM_LINK" 2>&1; then
             DOWNLOAD_OK=true
+            echo "✅ yt-dlp succeeded"
           else
-            echo "⚠️  aria2c failed (exit $?), trying HTTP/1.1 curl..."
-            rm -f "tmp_downloads/$FINAL_NAME"
+            echo "⚠️  yt-dlp failed, trying CDN scrape..."
+          fi
 
-            echo "🔄 Attempt 2/3 — curl HTTP/1.1..."
-            if curl -L --progress-bar --max-time 7200 --retry 5 --retry-delay 10 \
-                --http1.1 \
-                -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+          if [ "$DOWNLOAD_OK" = false ]; then
+            echo "🔄 Attempt 2 — CDN scrape..."
+
+            PAGE_HTML=$(curl -sL --max-time 20 \
+              -H "User-Agent: TelegramBot (like TwitterBot)" \
+              "$TELEGRAM_LINK" 2>/dev/null || echo "")
+
+            RAW_URL=""
+
+            VIDEO_URL=$(echo "$PAGE_HTML" | grep -oP '(?<=content=")[^"]+\.(mp4|mov|avi|mkv)[^"]*' | head -1 || echo "")
+            [ -n "$VIDEO_URL" ] && RAW_URL="$VIDEO_URL" && echo "✅ Found video via og:video"
+
+            if [ -z "$RAW_URL" ]; then
+              AUDIO_URL=$(echo "$PAGE_HTML" | grep -oP '(?<=content=")[^"]+\.(mp3|m4a|ogg|flac|wav)[^"]*' | head -1 || echo "")
+              [ -n "$AUDIO_URL" ] && RAW_URL="$AUDIO_URL" && echo "✅ Found audio URL"
+            fi
+
+            if [ -z "$RAW_URL" ]; then
+              DOC_URL=$(echo "$PAGE_HTML" | grep -oP '(?<=content=")[^"]+\.(pdf|zip|rar|7z)[^"]*' | head -1 || echo "")
+              [ -n "$DOC_URL" ] && RAW_URL="$DOC_URL" && echo "✅ Found document URL"
+            fi
+
+            if [ -z "$RAW_URL" ]; then
+              CDN_URLS=$(echo "$PAGE_HTML" | grep -oP 'https://cdn[0-9]*\.telesco\.pe/file/[^"]+' || echo "")
+              while IFS= read -r CANDIDATE; do
+                [ -z "$CANDIDATE" ] && continue
+                CT=$(curl -sI --max-time 10 \
+                  -H "User-Agent: Mozilla/5.0" \
+                  -H "Referer: https://t.me/" \
+                  "$CANDIDATE" 2>/dev/null | grep -i "content-type:" | head -1 | tr -d '\r')
+                if echo "$CT" | grep -qiE "video|audio|octet-stream|zip|pdf|rar|7z"; then
+                  RAW_URL="$CANDIDATE"
+                  echo "✅ Found non-image CDN URL"
+                  break
+                else
+                  echo "⚠️  Skipping thumbnail CDN URL"
+                fi
+              done <<< "$CDN_URLS"
+            fi
+
+            if [ -n "$RAW_URL" ] && [ "$RAW_URL" != "null" ]; then
+              CONTENT_TYPE=$(curl -sI --max-time 10 \
+                -H "User-Agent: Mozilla/5.0" \
                 -H "Referer: https://t.me/" \
-                -o "tmp_downloads/$FINAL_NAME" \
-                "$ENCODED_URL"; then
-              DOWNLOAD_OK=true
-            else
-              echo "⚠️  curl HTTP/1.1 failed (exit $?), trying wget..."
-              rm -f "tmp_downloads/$FINAL_NAME"
+                "$RAW_URL" 2>/dev/null | grep -i "content-type:" | head -1 | tr -d '\r')
 
-              echo "🔄 Attempt 3/3 — wget..."
-              if wget -q --show-progress \
-                    --timeout=7200 \
-                    --tries=5 \
-                    --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-                    --referer="https://t.me/" \
-                    -O "tmp_downloads/$FINAL_NAME" \
-                    "$ENCODED_URL"; then
+              EXT=$(python3 -c "import sys; ct=sys.argv[1].lower(); m={'video/mp4':'mp4','video/webm':'webm','video/x-matroska':'mkv','video/quicktime':'mov','audio/mpeg':'mp3','audio/mp4':'m4a','audio/ogg':'ogg','audio/flac':'flac','audio/wav':'wav','image/jpeg':'jpg','image/png':'png','image/gif':'gif','image/webp':'webp','application/pdf':'pdf','application/zip':'zip','application/x-7z-compressed':'7z','application/x-rar-compressed':'rar'}; [(__import__('sys').stdout.write(v+'\n'),exit()) for k,v in m.items() if k in ct]; print('bin')" "$CONTENT_TYPE")
+
+              FINAL_NAME="telegram_$(date +%s).${EXT}"
+
+              ENCODED_URL=$(python3 -c "import sys,urllib.parse; url=sys.argv[1]; has_q='?' in url; has_h='#' in url; p,r=(url.split('?',1) if has_q else (url.split('#',1) if has_h else (url,''))); r=('?'+r if has_q else ('#'+r if has_h else '')); print(urllib.parse.quote(p,safe=':/@.-_~!\$&()*+,;=')+r)" "$RAW_URL")
+
+              echo "🔗 URL: $ENCODED_URL"
+              echo "📄 File: $FINAL_NAME"
+
+              if aria2c \
+                  --out="$FINAL_NAME" \
+                  --dir="tmp_downloads" \
+                  --split=16 \
+                  --max-connection-per-server=16 \
+                  --min-split-size=2M \
+                  --max-tries=5 \
+                  --retry-wait=5 \
+                  --timeout=60 \
+                  --connect-timeout=30 \
+                  --header="User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+                  --header="Referer: https://t.me/" \
+                  --allow-overwrite=true \
+                  --auto-file-renaming=false \
+                  "$ENCODED_URL"; then
                 DOWNLOAD_OK=true
               else
-                echo "❌ All 3 download methods failed"
+                rm -f "tmp_downloads/$FINAL_NAME"
+                echo "⚠️  aria2c failed, trying curl..."
+                if curl -L --progress-bar --max-time 7200 --retry 5 --retry-delay 10 \
+                    --http1.1 \
+                    -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+                    -H "Referer: https://t.me/" \
+                    -o "tmp_downloads/$FINAL_NAME" \
+                    "$ENCODED_URL"; then
+                  DOWNLOAD_OK=true
+                else
+                  rm -f "tmp_downloads/$FINAL_NAME"
+                  echo "⚠️  curl failed, trying wget..."
+                  if wget -q --show-progress \
+                        --timeout=7200 --tries=5 \
+                        --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+                        --referer="https://t.me/" \
+                        -O "tmp_downloads/$FINAL_NAME" \
+                        "$ENCODED_URL"; then
+                    DOWNLOAD_OK=true
+                  fi
+                fi
               fi
             fi
           fi
 
-          if [ "$DOWNLOAD_OK" = false ] || [ ! -f "tmp_downloads/$FINAL_NAME" ]; then
-            echo "❌ Download failed after all attempts"
+          if [ "$DOWNLOAD_OK" = false ]; then
+            echo "❌ All download methods failed"
             exit 1
           fi
 
-          SIZE=$(stat -c%s "tmp_downloads/$FINAL_NAME")
+          FINAL_FILE=$(find tmp_downloads -type f | head -1)
+          FINAL_NAME=$(basename "$FINAL_FILE")
 
+          SIZE=$(stat -c%s "tmp_downloads/$FINAL_NAME")
           if [ "$SIZE" -lt 1024 ]; then
-            echo "❌ ERROR: File too small (${SIZE} bytes) — likely an error page"
+            echo "❌ File too small (${SIZE} bytes) — likely an error page"
             head -5 "tmp_downloads/$FINAL_NAME"
-            rm "tmp_downloads/$FINAL_NAME"
             exit 1
           fi
 
@@ -301,7 +203,7 @@ jobs:
           echo "file_size_mb=$SIZE_MB"       >> $GITHUB_OUTPUT
           echo "downloaded_name=$FINAL_NAME" >> $GITHUB_OUTPUT
 
-      - name: 📦 Package & organise into folder
+      - name: 📦 Package & organise
         run: |
           FILENAME="${{ steps.download.outputs.downloaded_name }}"
           FILE_SIZE="${{ steps.download.outputs.file_size }}"
@@ -309,33 +211,22 @@ jobs:
           ZIP_PASSWORD="${{ github.event.inputs.password }}"
           BACKUP_DIR=$(cat /tmp/backup_dir_path.txt)
           TELEGRAM_LINK="${{ github.event.inputs.telegram_link }}"
-
           REPO_OWNER="${{ github.repository_owner }}"
           REPO_NAME="${{ github.event.repository.name }}"
           BRANCH="${GITHUB_REF_NAME}"
 
           FILE_SIZE_MB_INT=$(echo "$FILE_SIZE_MB" | cut -d'.' -f1)
 
-          if   [ "$FILE_SIZE_MB_INT" -lt 45 ]; then
-            SPLIT_MB=0
-          elif [ "$FILE_SIZE_MB_INT" -lt 500 ]; then
-            SPLIT_MB=45
-          elif [ "$FILE_SIZE_MB_INT" -lt 2048 ]; then
-            SPLIT_MB=90
-          else
-            SPLIT_MB=190
+          if   [ "$FILE_SIZE_MB_INT" -lt 45 ];   then SPLIT_MB=0
+          elif [ "$FILE_SIZE_MB_INT" -lt 500 ];  then SPLIT_MB=45
+          elif [ "$FILE_SIZE_MB_INT" -lt 2048 ]; then SPLIT_MB=90
+          else SPLIT_MB=190
           fi
 
           SPLIT_LIMIT=$(( SPLIT_MB * 1024 * 1024 ))
 
           echo "═══════════════════════════════════════════════════════════════"
-          echo "📊 Smart split decision:"
-          echo "   💾 File size  : ${FILE_SIZE_MB} MB"
-          if [ "$SPLIT_MB" -eq 0 ]; then
-            echo "   ✂️  Split      : not needed — file fits GitHub limits"
-          else
-            echo "   ✂️  Split size : ${SPLIT_MB} MB per part (auto-selected)"
-          fi
+          echo "📊 File: ${FILE_SIZE_MB} MB — Split: ${SPLIT_MB} MB parts"
           echo "═══════════════════════════════════════════════════════════════"
 
           urlencode() {
@@ -347,8 +238,7 @@ jobs:
                         "sun" "sky" "cloud" "river" "ocean" "mountain")
 
           get_unique_folder() {
-            local BASE_PATH="$1"
-            local NAME="$2"
+            local BASE_PATH="$1" NAME="$2"
             if [ ! -d "$BASE_PATH/$NAME" ] && [ ! -d "$BACKUP_DIR/$NAME" ]; then
               echo "$NAME"; return
             fi
@@ -368,24 +258,18 @@ jobs:
           mkdir -p "$FOLDER_DIR"
           FOLDER_ENCODED=$(urlencode "$FINAL_FOLDER")
 
-          echo "📁 Target folder : $FINAL_FOLDER"
+          echo "📁 Folder: $FINAL_FOLDER"
 
           if [ "$SPLIT_MB" -gt 0 ] && [ "$FILE_SIZE" -gt "$SPLIT_LIMIT" ]; then
-
-            echo "✂️  Creating split 7z archive (${SPLIT_MB} MB parts)..."
+            echo "✂️  Splitting into ${SPLIT_MB} MB parts..."
             ARCHIVE_BASE="$FOLDER_DIR/$FINAL_FOLDER"
-
             if [ -n "$ZIP_PASSWORD" ]; then
-              7z a -v${SPLIT_MB}m -p"${ZIP_PASSWORD}" -mhe=on -mx=0 \
-                "${ARCHIVE_BASE}.7z" "tmp_downloads/$FILENAME"
+              7z a -v${SPLIT_MB}m -p"${ZIP_PASSWORD}" -mhe=on -mx=0 "${ARCHIVE_BASE}.7z" "tmp_downloads/$FILENAME"
             else
-              7z a -v${SPLIT_MB}m -mx=0 \
-                "${ARCHIVE_BASE}.7z" "tmp_downloads/$FILENAME"
+              7z a -v${SPLIT_MB}m -mx=0 "${ARCHIVE_BASE}.7z" "tmp_downloads/$FILENAME"
             fi
 
             PART_COUNT=$(ls "$FOLDER_DIR/"*.7z* 2>/dev/null | wc -l)
-            echo "   ✅ Created $PART_COUNT parts"
-
             TOTAL_ARC_SIZE=0
             for pf in "$FOLDER_DIR"/*; do
               [ -f "$pf" ] || continue
@@ -405,43 +289,27 @@ jobs:
             done
 
             {
-              printf '# %s\n\n' "$FINAL_FOLDER"
-              printf -- '---\n\n'
-              printf '## 📋 File Information\n\n'
-              printf '| Property | Value |\n'
-              printf '|----------|-------|\n'
+              printf '# %s\n\n---\n\n## 📋 File Information\n\n' "$FINAL_FOLDER"
+              printf '| Property | Value |\n|----------|-------|\n'
               printf '| **File Name** | `%s` |\n' "$FILENAME_NO_EXT"
               printf '| **Source Link** | [Telegram Post](%s) |\n' "$TELEGRAM_LINK"
               printf '| **Original Size** | **%s MB** |\n' "$FILE_SIZE_MB"
               printf '| **Archive** | **%s parts — %s MB total** |\n' "$PART_COUNT" "$TOTAL_ARC_MB"
-              printf '| **Part Size** | **%s MB per part** (auto-selected) |\n' "$SPLIT_MB"
+              printf '| **Part Size** | **%s MB per part** |\n' "$SPLIT_MB"
               printf '| **Status** | ✅ Complete |\n'
-              if [ -n "$ZIP_PASSWORD" ]; then
-                printf '| **Password Protected** | 🔐 **YES** |\n'
-              else
-                printf '| **Password Protected** | **NO** |\n'
-              fi
-              printf '\n---\n\n'
-              printf '## ⬇️ Download Links\n\n'
-              printf '| # | File | Link |\n'
-              printf '|---|------|------|\n'
+              [ -n "$ZIP_PASSWORD" ] && printf '| **Password Protected** | 🔐 **YES** |\n' || printf '| **Password Protected** | **NO** |\n'
+              printf '\n---\n\n## ⬇️ Download Links\n\n| # | File | Link |\n|---|------|------|\n'
               printf '%s' "$DOWNLOAD_LINKS_MD"
-              printf '\n---\n\n'
-              printf '## 📖 How to Extract\n\n'
-              printf '1. **Download** all parts (`.7z.001`, `.7z.002`, ...)\n'
-              printf '2. **Install** [7-Zip](https://www.7-zip.org/) (Windows/Linux) or [Keka](https://www.keka.io/) (Mac)\n'
-              printf '3. **Right-click** the `.7z.001` file → **Extract Here**\n'
-              printf '4. All parts combine automatically into the original file\n'
-              [ -n "$ZIP_PASSWORD" ] && printf '5. **Enter the password** when prompted\n'
-              printf '\n---\n\n'
-              printf '*Downloaded via GitHub Actions Telegram Downloader*\n'
+              printf '\n---\n\n## 📖 How to Extract\n\n'
+              printf '1. Download all parts\n2. Install [7-Zip](https://www.7-zip.org/) or [Keka](https://www.keka.io/)\n'
+              printf '3. Right-click `.7z.001` → Extract Here\n'
+              [ -n "$ZIP_PASSWORD" ] && printf '4. Enter the password when prompted\n'
+              printf '\n---\n\n*Downloaded via GitHub Actions Telegram Downloader*\n'
             } > "$FOLDER_DIR/README.md"
 
           elif [ -n "$ZIP_PASSWORD" ]; then
-
-            echo "🔐 Creating password-protected 7z archive..."
-            7z a -p"${ZIP_PASSWORD}" -mhe=on -mx=0 \
-              "$FOLDER_DIR/${FINAL_FOLDER}.7z" "tmp_downloads/$FILENAME"
+            echo "🔐 Creating password-protected archive..."
+            7z a -p"${ZIP_PASSWORD}" -mhe=on -mx=0 "$FOLDER_DIR/${FINAL_FOLDER}.7z" "tmp_downloads/$FILENAME"
 
             ARC_SIZE=$(stat -c%s "$FOLDER_DIR/${FINAL_FOLDER}.7z" 2>/dev/null || echo 0)
             ARC_MB=$(echo "scale=2; $ARC_SIZE / 1024 / 1024" | bc)
@@ -449,61 +317,43 @@ jobs:
             RAW="https://github.com/${REPO_OWNER}/${REPO_NAME}/raw/${BRANCH}/downloads/${FOLDER_ENCODED}/${FILE_ENC}"
 
             {
-              printf '# %s\n\n' "$FINAL_FOLDER"
-              printf -- '---\n\n'
-              printf '## 📋 File Information\n\n'
-              printf '| Property | Value |\n'
-              printf '|----------|-------|\n'
+              printf '# %s\n\n---\n\n## 📋 File Information\n\n' "$FINAL_FOLDER"
+              printf '| Property | Value |\n|----------|-------|\n'
               printf '| **File Name** | `%s` |\n' "$FILENAME_NO_EXT"
               printf '| **Source Link** | [Telegram Post](%s) |\n' "$TELEGRAM_LINK"
               printf '| **Original Size** | **%s MB** |\n' "$FILE_SIZE_MB"
               printf '| **Archive Size** | **%s MB** |\n' "$ARC_MB"
               printf '| **Status** | ✅ Complete |\n'
               printf '| **Password Protected** | 🔐 **YES** |\n'
-              printf '\n---\n\n'
-              printf '## ⬇️ Download Link\n\n'
-              printf '| # | File | Link |\n'
-              printf '|---|------|------|\n'
+              printf '\n---\n\n## ⬇️ Download Link\n\n| # | File | Link |\n|---|------|------|\n'
               printf '| 1 | `%s.7z` | [⬇️ Download](%s) |\n' "$FINAL_FOLDER" "$RAW"
-              printf '\n---\n\n'
-              printf '## 📖 How to Extract\n\n'
-              printf '1. **Install** [7-Zip](https://www.7-zip.org/) (Windows/Linux) or [Keka](https://www.keka.io/) (Mac)\n'
-              printf '2. **Right-click** the `.7z` file → **Extract Here**\n'
-              printf '3. **Enter the password** when prompted\n'
-              printf '\n---\n\n'
-              printf '*Downloaded via GitHub Actions Telegram Downloader*\n'
+              printf '\n---\n\n## 📖 How to Extract\n\n'
+              printf '1. Install [7-Zip](https://www.7-zip.org/) or [Keka](https://www.keka.io/)\n'
+              printf '2. Right-click the `.7z` file → Extract Here\n'
+              printf '3. Enter the password when prompted\n'
+              printf '\n---\n\n*Downloaded via GitHub Actions Telegram Downloader*\n'
             } > "$FOLDER_DIR/README.md"
 
           else
-
-            echo "📄 File fits without splitting — storing directly..."
+            echo "📄 Storing file directly..."
             cp "tmp_downloads/$FILENAME" "$FOLDER_DIR/${FINAL_FOLDER}.${EXT}"
 
             FILE_ENC=$(urlencode "${FINAL_FOLDER}.${EXT}")
             RAW="https://github.com/${REPO_OWNER}/${REPO_NAME}/raw/${BRANCH}/downloads/${FOLDER_ENCODED}/${FILE_ENC}"
 
             {
-              printf '# %s\n\n' "$FINAL_FOLDER"
-              printf -- '---\n\n'
-              printf '## 📋 File Information\n\n'
-              printf '| Property | Value |\n'
-              printf '|----------|-------|\n'
+              printf '# %s\n\n---\n\n## 📋 File Information\n\n' "$FINAL_FOLDER"
+              printf '| Property | Value |\n|----------|-------|\n'
               printf '| **File Name** | `%s` |\n' "$FILENAME_NO_EXT"
               printf '| **Source Link** | [Telegram Post](%s) |\n' "$TELEGRAM_LINK"
-              printf '| **Size** | **%s MB** (single file — no split needed) |\n' "$FILE_SIZE_MB"
+              printf '| **Size** | **%s MB** |\n' "$FILE_SIZE_MB"
               printf '| **Status** | ✅ Complete |\n'
               printf '| **Password Protected** | **NO** |\n'
-              printf '\n---\n\n'
-              printf '## ⬇️ Download Link\n\n'
-              printf '| # | File | Link |\n'
-              printf '|---|------|------|\n'
+              printf '\n---\n\n## ⬇️ Download Link\n\n| # | File | Link |\n|---|------|------|\n'
               printf '| 1 | `%s.%s` | [⬇️ Download](%s) |\n' "$FINAL_FOLDER" "$EXT" "$RAW"
-              printf '\n---\n\n'
-              printf 'Ready to use — no extraction needed!\n'
-              printf '\n---\n\n'
-              printf '*Downloaded via GitHub Actions Telegram Downloader*\n'
+              printf '\n---\n\nReady to use — no extraction needed!\n'
+              printf '\n---\n\n*Downloaded via GitHub Actions Telegram Downloader*\n'
             } > "$FOLDER_DIR/README.md"
-
           fi
 
           rm -rf tmp_downloads
@@ -514,7 +364,7 @@ jobs:
 
           echo "folder_name=$FINAL_FOLDER" >> $GITHUB_ENV
 
-      - name: 📤 Incremental commit & push
+      - name: 📤 Commit & push
         run: |
           BRANCH="${GITHUB_REF_NAME}"
           REPO_OWNER="${{ github.repository_owner }}"
@@ -522,13 +372,10 @@ jobs:
           BACKUP_DIR=$(cat /tmp/backup_dir_path.txt)
 
           regenerate_master_readme() {
-            MASTER_README="downloads/README.md"
             mkdir -p downloads
-
             {
-              printf '# 📲 Telegram Downloaded Files\n\n'
-              printf -- '---\n\n'
-            } > "$MASTER_README"
+              printf '# 📲 Telegram Downloaded Files\n\n---\n\n'
+            } > "downloads/README.md"
 
             FILE_EMOJIS=("📁" "📂" "🗂️" "📦" "🗃️" "💾" "📎" "🔗" "📋" "🗄️"
                          "🎬" "🎥" "🎵" "🎶" "📸" "🖼️" "📄" "📑" "📃" "🗒️")
@@ -541,54 +388,16 @@ jobs:
               EMOJI="${FILE_EMOJIS[$RANDOM % ${#FILE_EMOJIS[@]}]}"
               FENC=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$FOLDER_NAME")
               LINK="https://github.com/${REPO_OWNER}/${REPO_NAME}/tree/${BRANCH}/downloads/${FENC}"
-              printf -- '- %d %s [%s](%s)\n' "$NUM" "$EMOJI" "$FOLDER_NAME" "$LINK" >> "$MASTER_README"
+              printf -- '- %d %s [%s](%s)\n' "$NUM" "$EMOJI" "$FOLDER_NAME" "$LINK" >> "downloads/README.md"
             done
 
-            printf '\n---\n\n*Auto-generated by GitHub Actions Telegram Downloader*\n' >> "$MASTER_README"
-            echo "📋 Master README updated — $NUM folder(s) listed"
-          }
-
-          push_single_file() {
-            local FILE_PATH="$1"
-            local MAX_RETRIES=5
-            local RETRY=0
-            while [ $RETRY -lt $MAX_RETRIES ]; do
-              RETRY=$(( RETRY + 1 ))
-              git fetch origin "$BRANCH" --quiet 2>/dev/null || true
-              LOCAL_HEAD=$(git rev-parse HEAD 2>/dev/null || echo "none")
-              REMOTE_HEAD=$(git rev-parse origin/"$BRANCH" 2>/dev/null || echo "none")
-              if [ "$LOCAL_HEAD" != "$REMOTE_HEAD" ] && [ "$REMOTE_HEAD" != "none" ]; then
-                git reset --hard origin/"$BRANCH" 2>/dev/null || true
-                mkdir -p downloads
-                cp -r "$BACKUP_DIR"/* downloads/ 2>/dev/null || true
-              fi
-              git add "$FILE_PATH" 2>/dev/null || true
-              if git diff --cached --quiet 2>/dev/null; then
-                echo "    ⏭️  Already uploaded: $FILE_PATH"
-                return 0
-              fi
-              FNAME=$(basename "$FILE_PATH")
-              git commit -m "📲 Add: $FNAME [skip ci]" --quiet 2>/dev/null || true
-              echo "    🚀 Push attempt $RETRY/$MAX_RETRIES..."
-              if timeout 120 git push origin HEAD:"$BRANCH" 2>&1; then
-                echo "    ✅ Success!"
-                return 0
-              else
-                echo "    ⚠️  Failed, retrying..."
-                sleep $(( 2 + RANDOM % 5 ))
-              fi
-            done
-            echo "    ❌ WARNING: Could not push $FILE_PATH after $MAX_RETRIES attempts"
-            return 1
+            printf '\n---\n\n*Auto-generated by GitHub Actions Telegram Downloader*\n' >> "downloads/README.md"
+            echo "📋 Master README updated — $NUM folder(s)"
           }
 
           push_batch() {
-            local BATCH_SIZE=3
-            local FILES=("$@")
-            local BATCH_COUNT=0
-            local BATCH_FILES=()
-            local TOTAL_PUSHED=0
-            local TOTAL_FILES=${#FILES[@]}
+            local BATCH_SIZE=3 FILES=("$@") BATCH_COUNT=0 BATCH_FILES=()
+            local TOTAL_PUSHED=0 TOTAL_FILES=${#FILES[@]}
 
             for FILE in "${FILES[@]}"; do
               BATCH_FILES+=("$FILE")
@@ -596,50 +405,40 @@ jobs:
 
               if [ $BATCH_COUNT -ge $BATCH_SIZE ]; then
                 TOTAL_PUSHED=$(( TOTAL_PUSHED + BATCH_COUNT ))
-                echo ""
-                echo ">>> 📦 Pushing batch ($TOTAL_PUSHED / $TOTAL_FILES files)..."
-
+                echo ">>> 📦 Pushing batch ($TOTAL_PUSHED / $TOTAL_FILES)..."
                 git fetch origin "$BRANCH" --quiet 2>/dev/null || true
                 git reset --hard origin/"$BRANCH" 2>/dev/null || true
                 mkdir -p downloads
                 cp -r "$BACKUP_DIR"/* downloads/ 2>/dev/null || true
-
                 for BF in "${BATCH_FILES[@]}"; do git add "$BF" 2>/dev/null || true; done
-
                 if ! git diff --cached --quiet 2>/dev/null; then
-                  git commit -m "📲 Add batch of $BATCH_COUNT files [skip ci]" --quiet 2>/dev/null || true
-                  local PR=0; local PS=false
+                  git commit -m "📲 Add batch [skip ci]" --quiet 2>/dev/null || true
+                  local PR=0
                   while [ $PR -lt 5 ]; do
                     PR=$(( PR + 1 ))
                     if timeout 180 git push origin HEAD:"$BRANCH" 2>&1; then
-                      PS=true; echo "    ✅ Batch pushed!"; break
+                      echo "    ✅ Pushed!"; break
                     else
                       echo "    ⚠️  Retry $PR/5..."
+                      sleep $(( 3 + RANDOM % 7 ))
                       git fetch origin "$BRANCH" --quiet 2>/dev/null || true
                       git reset --hard origin/"$BRANCH" 2>/dev/null || true
                       mkdir -p downloads
                       cp -r "$BACKUP_DIR"/* downloads/ 2>/dev/null || true
                       for BF in "${BATCH_FILES[@]}"; do git add "$BF" 2>/dev/null || true; done
                       if ! git diff --cached --quiet 2>/dev/null; then
-                        git commit -m "📲 Add batch of $BATCH_COUNT files [skip ci]" --quiet 2>/dev/null || true
+                        git commit -m "📲 Add batch [skip ci]" --quiet 2>/dev/null || true
                       fi
-                      sleep $(( 3 + RANDOM % 7 ))
                     fi
                   done
-                  if [ "$PS" = false ]; then
-                    echo "    ⚠️  Batch failed — pushing individually..."
-                    for BF in "${BATCH_FILES[@]}"; do push_single_file "$BF"; done
-                  fi
                 fi
-
                 BATCH_FILES=(); BATCH_COUNT=0; sleep 2
               fi
             done
 
             if [ ${#BATCH_FILES[@]} -gt 0 ]; then
               TOTAL_PUSHED=$(( TOTAL_PUSHED + ${#BATCH_FILES[@]} ))
-              echo ""
-              echo ">>> 📦 Pushing final batch ($TOTAL_PUSHED / $TOTAL_FILES files)..."
+              echo ">>> 📦 Pushing final batch ($TOTAL_PUSHED / $TOTAL_FILES)..."
               git fetch origin "$BRANCH" --quiet 2>/dev/null || true
               git reset --hard origin/"$BRANCH" 2>/dev/null || true
               mkdir -p downloads
@@ -651,7 +450,7 @@ jobs:
                 while [ $PR -lt 5 ]; do
                   PR=$(( PR + 1 ))
                   if timeout 180 git push origin HEAD:"$BRANCH" 2>&1; then
-                    echo "    ✅ Final batch pushed!"; break
+                    echo "    ✅ Pushed!"; break
                   else
                     echo "    ⚠️  Retry $PR/5..."
                     sleep $(( 3 + RANDOM % 7 ))
@@ -669,37 +468,21 @@ jobs:
             fi
           }
 
-          echo ""
-          echo "═══════════════════════════════════════════════════════════════"
-          echo "🚀 Starting incremental push..."
-          echo "═══════════════════════════════════════════════════════════════"
-
           echo "🔄 Syncing with remote..."
           git fetch origin "$BRANCH"
           git reset --hard origin/"$BRANCH"
-
           mkdir -p downloads
           cp -r "$BACKUP_DIR"/* downloads/
 
-          echo "🔍 Scanning files..."
           ALL_FILES=()
-
           while IFS= read -r -d '' FILE; do
             ALL_FILES+=("$FILE")
           done < <(find downloads -name "README.md" -print0 2>/dev/null)
-
           while IFS= read -r -d '' FILE; do
             ALL_FILES+=("$FILE")
           done < <(find downloads -type f ! -name "README.md" -print0 2>/dev/null | sort -z)
 
           TOTAL_FILES=${#ALL_FILES[@]}
-          echo "📦 Files found: $TOTAL_FILES"
-
-          if [ $TOTAL_FILES -eq 0 ]; then
-            echo "⚠️  No files to push!"
-            exit 0
-          fi
-
           TOTAL_SIZE=0
           for F in "${ALL_FILES[@]}"; do
             [ -f "$F" ] || continue
@@ -707,25 +490,23 @@ jobs:
             TOTAL_SIZE=$(( TOTAL_SIZE + FS ))
           done
           TOTAL_SIZE_MB=$(( TOTAL_SIZE / 1024 / 1024 ))
-          echo "💾 Total size  : ${TOTAL_SIZE_MB} MB"
-          echo ""
+
+          echo "📦 Files: $TOTAL_FILES — Size: ${TOTAL_SIZE_MB} MB"
 
           if [ $TOTAL_SIZE_MB -lt 100 ]; then
             echo "📤 Small upload — pushing all at once..."
-
             git add -A downloads/
             regenerate_master_readme
             git add downloads/README.md
-
             if ! git diff --cached --quiet; then
               git commit -m "📲 Telegram download [skip ci]"
               PR=0
               while [ $PR -lt 10 ]; do
                 PR=$(( PR + 1 ))
                 if timeout 300 git push origin HEAD:"$BRANCH"; then
-                  echo "✅ Push successful!"; break
+                  echo "✅ Pushed!"; break
                 else
-                  echo "⚠️  Push failed, retry $PR/10..."
+                  echo "⚠️  Retry $PR/10..."
                   sleep $(( 3 + RANDOM % 7 ))
                   git fetch origin "$BRANCH"
                   git reset --hard origin/"$BRANCH"
@@ -740,40 +521,32 @@ jobs:
                 fi
               done
             fi
-
           else
-            echo "📤 Large upload (${TOTAL_SIZE_MB}MB) — incremental batch push..."
+            echo "📤 Large upload — batch push..."
             push_batch "${ALL_FILES[@]}"
 
-            echo ""
-            echo "📋 Updating master README..."
             git fetch origin "$BRANCH" --quiet 2>/dev/null || true
             git reset --hard origin/"$BRANCH" 2>/dev/null || true
             mkdir -p downloads
             cp -r "$BACKUP_DIR"/* downloads/ 2>/dev/null || true
-
             regenerate_master_readme
             git add downloads/README.md
-
             if ! git diff --cached --quiet 2>/dev/null; then
-              git commit -m "📋 Update Telegram downloads list [skip ci]" --quiet 2>/dev/null || true
+              git commit -m "📋 Update downloads list [skip ci]" --quiet 2>/dev/null || true
               PR=0
               while [ $PR -lt 5 ]; do
                 PR=$(( PR + 1 ))
                 if timeout 60 git push origin HEAD:"$BRANCH" 2>&1; then
-                  echo "✅ Master README pushed!"; break
+                  echo "✅ README pushed!"; break
                 else
-                  echo "⚠️  Retry $PR/5..."
-                  sleep 3
+                  echo "⚠️  Retry $PR/5..."; sleep 3
                 fi
               done
             fi
           fi
 
           echo ""
-          echo "═══════════════════════════════════════════════════════════════"
-          echo "🎉 All done! Files are in: downloads/${{ env.folder_name }}/"
-          echo "═══════════════════════════════════════════════════════════════"
+          echo "🎉 Done! Files in: downloads/${{ env.folder_name }}/"
 
       - name: 📋 Final report
         if: always()
