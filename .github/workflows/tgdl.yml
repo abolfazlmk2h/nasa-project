@@ -80,13 +80,30 @@ jobs:
             exit 1
           fi
 
-          FILE_NAME=$(python3 -c "
-          import sys, urllib.parse
-          url = sys.argv[1].split('?')[0].split('#')[0]
-          name = urllib.parse.unquote(url.split('/')[-1])
-          print(name)
-          " "$RAW_URL")
-          [ -z "$FILE_NAME" ] && FILE_NAME="telegram_file_$(date +%s)"
+          CONTENT_TYPE=$(curl -sI --max-time 10 \
+            -H "User-Agent: Mozilla/5.0" \
+            -H "Referer: https://t.me/" \
+            "$RAW_URL" 2>/dev/null | grep -i "content-type:" | head -1 | tr -d '\r')
+          
+          EXT_MAP=$(python3 -c "
+          import sys
+          ct = sys.argv[1].lower()
+          m = {
+            'video/mp4':'mp4','video/webm':'webm','video/x-matroska':'mkv',
+            'video/quicktime':'mov','video/x-msvideo':'avi',
+            'audio/mpeg':'mp3','audio/mp4':'m4a','audio/ogg':'ogg',
+            'audio/flac':'flac','audio/wav':'wav',
+            'image/jpeg':'jpg','image/png':'png','image/gif':'gif','image/webp':'webp',
+            'application/pdf':'pdf','application/zip':'zip',
+            'application/x-7z-compressed':'7z','application/x-rar-compressed':'rar',
+          }
+          for k,v in m.items():
+            if k in ct:
+              print(v); exit()
+          print('bin')
+          " "$CONTENT_TYPE")
+          
+          FILE_NAME="telegram_$(date +%s).${EXT_MAP}"
 
           ENCODED_URL=$(python3 -c "
           import sys, urllib.parse
