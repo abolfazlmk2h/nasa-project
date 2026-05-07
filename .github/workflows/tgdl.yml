@@ -42,7 +42,7 @@ jobs:
       - name: 🔧 Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y curl jq openssl bc p7zip-full python3
+          sudo apt-get install -y curl jq openssl bc p7zip-full python3 aria2
 
           echo "✅ Dependencies installed"
           echo ""
@@ -224,27 +224,48 @@ jobs:
 
           DOWNLOAD_OK=false
 
-          # Attempt 1: default (HTTP/2)
-          echo "🔄 Attempt 1/3 — HTTP/2 (default)..."
-          if curl "${CURL_COMMON_ARGS[@]}" "$URL"; then
+          DOWNLOAD_OK=false
+
+          # Attempt 1: aria2c — multi-connection segmented download (like IDM)
+          echo "🔄 Attempt 1/3 — aria2c (16 connections, 4MB chunks)..."
+          if aria2c \
+              --out="$FINAL_NAME" \
+              --dir="tmp_downloads" \
+              --split=16 \
+              --max-connection-per-server=16 \
+              --min-split-size=4M \
+              --max-tries=5 \
+              --retry-wait=5 \
+              --timeout=60 \
+              --connect-timeout=30 \
+              --max-overall-download-limit=0 \
+              --header="User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+              --header="Referer: https://t.me/" \
+              --allow-overwrite=true \
+              --auto-file-renaming=false \
+              "$URL"; then
             DOWNLOAD_OK=true
           else
-            echo "⚠️  HTTP/2 failed (exit $?), trying HTTP/1.1..."
+            echo "⚠️  aria2c failed (exit $?), trying HTTP/1.1 curl..."
             rm -f "tmp_downloads/$FINAL_NAME"
-
-            # Attempt 2: force HTTP/1.1 — fixes curl error 92 (stream INTERNAL_ERROR)
-            echo "🔄 Attempt 2/3 — HTTP/1.1..."
-            if curl "${CURL_COMMON_ARGS[@]}" --http1.1 "$URL"; then
+          
+            # Attempt 2: force HTTP/1.1 curl
+            echo "🔄 Attempt 2/3 — curl HTTP/1.1..."
+            if curl -L --progress-bar --max-time 7200 --retry 5 --retry-delay 10 \
+                --http1.1 \
+                -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+                -H "Referer: https://t.me/" \
+                -o "tmp_downloads/$FINAL_NAME" \
+                "$URL"; then
               DOWNLOAD_OK=true
             else
-              echo "⚠️  HTTP/1.1 also failed (exit $?), trying wget fallback..."
+              echo "⚠️  curl HTTP/1.1 also failed (exit $?), trying wget..."
               rm -f "tmp_downloads/$FINAL_NAME"
-
-              # Attempt 3: wget as last resort
+          
+              # Attempt 3: wget
               echo "🔄 Attempt 3/3 — wget..."
               if wget -q --show-progress \
-                    --timeout=7200 \
-                    --tries=5 \
+                    --timeout=7200 --tries=5 \
                     --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
                     --referer="https://t.me/" \
                     -O "tmp_downloads/$FINAL_NAME" \
