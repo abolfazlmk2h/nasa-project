@@ -43,16 +43,16 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y curl jq openssl bc p7zip-full python3 aria2
-
           echo "✅ Dependencies installed"
           echo ""
           echo "Tool versions:"
           curl --version | head -1
           jq --version
           7z i 2>/dev/null | head -2
+          aria2c --version | head -1
 
-      - name: 🔍 Resolve Telegram download link
-        id: resolve
+      - name: 🔍 Resolve & Download
+        id: download
         run: |
           TELEGRAM_LINK="${{ github.event.inputs.telegram_link }}"
 
@@ -60,63 +60,17 @@ jobs:
           echo "🔗 Input link: $TELEGRAM_LINK"
           echo "═══════════════════════════════════════════════════════════════"
 
-          # ─── Method 1: telegramdownloader.net API ───────────────────────
-          echo ""
-          echo "🌐 Method 1: Trying telegramdownloader.net..."
+          PAGE_HTML=$(curl -sL --max-time 20 \
+            -H "User-Agent: TelegramBot (like TwitterBot)" \
+            "$TELEGRAM_LINK" 2>/dev/null || echo "")
 
-          RESPONSE=$(curl -s --max-time 30 -X POST \
-            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            -d "telegram_link=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$TELEGRAM_LINK")" \
-            https://telegramdownloader.net/proxy.php 2>/dev/null || echo "FAILED")
+          RAW_URL=$(echo "$PAGE_HTML" | grep -oP 'https://cdn[0-9]*\.telesco\.pe/file/[^"]+' | head -1 || echo "")
 
-          RAW_URL=""
-          FILE_NAME=""
-
-          
-          RAW_URL=$(echo "$RESPONSE" | jq -r '.data.data.link // empty' 2>/dev/null)
-          FILE_NAME=$(echo "$RESPONSE" | jq -r '.data.data.file_name // empty' 2>/dev/null)
-          
-
-          # ─── Method 2: tgsave style scraper ─────────────────────────────
-          if [ -z "$RAW_URL" ] || [ "$RAW_URL" = "null" ]; then
-            echo "⚠️  Method 1 failed. Trying Method 2: tgsave.com..."
-
-            RESPONSE2=$(curl -s --max-time 30 -X POST \
-              -H "User-Agent: Mozilla/5.0" \
-              -H "Content-Type: application/json" \
-              -d "{\"url\":\"$TELEGRAM_LINK\"}" \
-              https://api.tgsave.com/download 2>/dev/null || echo "FAILED")
-
-            if [ "$RESPONSE2" != "FAILED" ] && [ -n "$RESPONSE2" ]; then
-              RAW_URL=$(echo "$RESPONSE2" | jq -r '.url // .link // .download_url // empty' 2>/dev/null)
-              FILE_NAME=$(echo "$RESPONSE2" | jq -r '.filename // .file_name // .name // empty' 2>/dev/null)
-            fi
+          if [ -z "$RAW_URL" ]; then
+            RAW_URL=$(echo "$PAGE_HTML" | grep -oP '(?<=content=")[^"]+\.(mp4|mov|avi|mkv|pdf|zip|rar|7z|jpg|jpeg|png|gif|mp3|m4a|wav|flac)[^"]*' | head -1 || echo "")
           fi
 
-          # ─── Method 3: Direct CDN link detection ────────────────────────
           if [ -z "$RAW_URL" ] || [ "$RAW_URL" = "null" ]; then
-            echo "⚠️  Method 2 failed. Trying Method 3: Direct CDN detection..."
-
-            PAGE_HTML=$(curl -sL --max-time 20 \
-              -H "User-Agent: TelegramBot (like TwitterBot)" \
-              "$TELEGRAM_LINK" 2>/dev/null || echo "")
-
-            RAW_URL=$(echo "$PAGE_HTML" | grep -oP 'https://cdn[0-9]*\.telesco\.pe/file/[^"]+' | head -1 || echo "")
-
-            if [ -z "$RAW_URL" ]; then
-              RAW_URL=$(echo "$PAGE_HTML" | grep -oP '(?<=content=")[^"]+\.(mp4|mov|avi|mkv|pdf|zip|rar|7z|jpg|jpeg|png|gif|mp3|m4a|wav|flac)[^"]*' | head -1 || echo "")
-            fi
-
-            if [ -n "$RAW_URL" ]; then
-              FILE_NAME=$(basename "$RAW_URL" | sed 's/[?#].*//')
-              echo "✅ Found CDN link via page scrape"
-            fi
-          fi
-
-          # ─── Final validation ────────────────────────────────────────────
-          if [ -z "$RAW_URL" ] || [ "$RAW_URL" = "null" ]; then
-            echo ""
             echo "❌ ERROR: Could not resolve a download link from: $TELEGRAM_LINK"
             echo ""
             echo "Troubleshooting tips:"
@@ -126,12 +80,17 @@ jobs:
             exit 1
           fi
 
-          # ─── Encode non-ASCII chars in URL path (keep query string intact) ─
+          FILE_NAME=$(python3 -c "
+          import sys, urllib.parse
+          url = sys.argv[1].split('?')[0].split('#')[0]
+          name = urllib.parse.unquote(url.split('/')[-1])
+          print(name)
+          " "$RAW_URL")
+          [ -z "$FILE_NAME" ] && FILE_NAME="telegram_file_$(date +%s)"
+
           ENCODED_URL=$(python3 -c "
           import sys, urllib.parse
-
           url = sys.argv[1]
-
           if '?' in url:
               path_part, rest = url.split('?', 1)
               rest = '?' + rest
@@ -140,40 +99,14 @@ jobs:
               rest = '#' + rest
           else:
               path_part, rest = url, ''
-
           encoded_path = urllib.parse.quote(path_part, safe=':/@.-_~!\$&()*+,;=')
-
           print(encoded_path + rest)
           " "$RAW_URL")
 
-          # ─── Extract clean filename from URL (strip query/fragment first) ─
-          if [ -z "$FILE_NAME" ] || [ "$FILE_NAME" = "null" ]; then
-            RAW_PATH=$(python3 -c "
-          import sys, urllib.parse
-          url = sys.argv[1].split('?')[0].split('#')[0]
-          name = urllib.parse.unquote(url.split('/')[-1])
-          print(name)
-          " "$RAW_URL")
-            FILE_NAME="$RAW_PATH"
-            [ -z "$FILE_NAME" ] && FILE_NAME="telegram_file_$(date +%s)"
-          else
-            # API gave us a filename — still strip any stray query params
-            FILE_NAME=$(echo "$FILE_NAME" | sed 's/[?#].*//')
-          fi
-
           echo ""
-          echo "✅ Link resolved successfully!"
-          echo "📄 Filename   : $FILE_NAME"
-          echo "🔗 Direct URL : $ENCODED_URL"
-
-          echo "download_url=$ENCODED_URL" >> $GITHUB_OUTPUT
-          echo "original_name=$FILE_NAME"  >> $GITHUB_OUTPUT
-
-      - name: ⬇️ Download file
-        id: download
-        run: |
-          URL="${{ steps.resolve.outputs.download_url }}"
-          ORIGINAL_NAME="${{ steps.resolve.outputs.original_name }}"
+          echo "✅ Link resolved!"
+          echo "📄 Filename : $FILE_NAME"
+          echo "🔗 URL      : $ENCODED_URL"
 
           sanitize_name() {
             echo "$1" \
@@ -185,13 +118,12 @@ jobs:
               | tr -s '-'
           }
 
-          SAFE_NAME=$(sanitize_name "$ORIGINAL_NAME")
+          SAFE_NAME=$(sanitize_name "$FILE_NAME")
           [ -z "$SAFE_NAME" ] && SAFE_NAME="telegram_file_$(date +%s).bin"
 
           BACKUP_DIR="/tmp/tg_backup_$$"
           mkdir -p "$BACKUP_DIR"
           echo "$BACKUP_DIR" > /tmp/backup_dir_path.txt
-
           mkdir -p tmp_downloads
 
           BASE_NAME="${SAFE_NAME%.*}"
@@ -207,69 +139,51 @@ jobs:
 
           echo "═══════════════════════════════════════════════════════════════"
           echo "⬇️  Downloading : $FINAL_NAME"
-          echo "🔗 From        : $URL"
           echo "═══════════════════════════════════════════════════════════════"
 
-          CURL_COMMON_ARGS=(
-            -L
-            --progress-bar
-            --max-time 7200
-            --retry 5
-            --retry-delay 10
-            --retry-max-time 3600
-            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            -H "Referer: https://t.me/"
-            -o "tmp_downloads/$FINAL_NAME"
-          )
-
           DOWNLOAD_OK=false
 
-          DOWNLOAD_OK=false
-
-          # Attempt 1: aria2c — multi-connection segmented download (like IDM)
-          echo "🔄 Attempt 1/3 — aria2c (16 connections, 4MB chunks)..."
+          echo "🔄 Attempt 1/3 — aria2c (16 connections)..."
           if aria2c \
               --out="$FINAL_NAME" \
               --dir="tmp_downloads" \
               --split=16 \
               --max-connection-per-server=16 \
-              --min-split-size=4M \
+              --min-split-size=2M \
               --max-tries=5 \
               --retry-wait=5 \
               --timeout=60 \
               --connect-timeout=30 \
-              --max-overall-download-limit=0 \
               --header="User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
               --header="Referer: https://t.me/" \
               --allow-overwrite=true \
               --auto-file-renaming=false \
-              "$URL"; then
+              "$ENCODED_URL"; then
             DOWNLOAD_OK=true
           else
             echo "⚠️  aria2c failed (exit $?), trying HTTP/1.1 curl..."
             rm -f "tmp_downloads/$FINAL_NAME"
-          
-            # Attempt 2: force HTTP/1.1 curl
+
             echo "🔄 Attempt 2/3 — curl HTTP/1.1..."
             if curl -L --progress-bar --max-time 7200 --retry 5 --retry-delay 10 \
                 --http1.1 \
                 -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
                 -H "Referer: https://t.me/" \
                 -o "tmp_downloads/$FINAL_NAME" \
-                "$URL"; then
+                "$ENCODED_URL"; then
               DOWNLOAD_OK=true
             else
-              echo "⚠️  curl HTTP/1.1 also failed (exit $?), trying wget..."
+              echo "⚠️  curl HTTP/1.1 failed (exit $?), trying wget..."
               rm -f "tmp_downloads/$FINAL_NAME"
-          
-              # Attempt 3: wget
+
               echo "🔄 Attempt 3/3 — wget..."
               if wget -q --show-progress \
-                    --timeout=7200 --tries=5 \
+                    --timeout=7200 \
+                    --tries=5 \
                     --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
                     --referer="https://t.me/" \
                     -O "tmp_downloads/$FINAL_NAME" \
-                    "$URL"; then
+                    "$ENCODED_URL"; then
                 DOWNLOAD_OK=true
               else
                 echo "❌ All 3 download methods failed"
@@ -370,7 +284,6 @@ jobs:
 
           echo "📁 Target folder : $FINAL_FOLDER"
 
-          # ─── Branch A: split archive ─────────────────────────────────────
           if [ "$SPLIT_MB" -gt 0 ] && [ "$FILE_SIZE" -gt "$SPLIT_LIMIT" ]; then
 
             echo "✂️  Creating split 7z archive (${SPLIT_MB} MB parts)..."
@@ -405,10 +318,6 @@ jobs:
               DOWNLOAD_LINKS_MD="${DOWNLOAD_LINKS_MD}| ${LINK_NUM} | \`${PB}\` | [⬇️ Download](${RAW}) |"$'\n'
             done
 
-            cat > "$FOLDER_DIR/README.md" << 'READMEEOF'
-          # PLACEHOLDER
-          READMEEOF
-
             {
               printf '# %s\n\n' "$FINAL_FOLDER"
               printf -- '---\n\n'
@@ -442,7 +351,6 @@ jobs:
               printf '*Downloaded via GitHub Actions Telegram Downloader*\n'
             } > "$FOLDER_DIR/README.md"
 
-          # ─── Branch B: small file + password → single 7z ─────────────────
           elif [ -n "$ZIP_PASSWORD" ]; then
 
             echo "🔐 Creating password-protected 7z archive..."
@@ -480,7 +388,6 @@ jobs:
               printf '*Downloaded via GitHub Actions Telegram Downloader*\n'
             } > "$FOLDER_DIR/README.md"
 
-          # ─── Branch C: small file, no password → store as-is ─────────────
           else
 
             echo "📄 File fits without splitting — storing directly..."
@@ -643,7 +550,6 @@ jobs:
               fi
             done
 
-            # Push any remaining files in the last incomplete batch
             if [ ${#BATCH_FILES[@]} -gt 0 ]; then
               TOTAL_PUSHED=$(( TOTAL_PUSHED + ${#BATCH_FILES[@]} ))
               echo ""
@@ -692,12 +598,10 @@ jobs:
           echo "🔍 Scanning files..."
           ALL_FILES=()
 
-          # READMEs first (small, aid navigation)
           while IFS= read -r -d '' FILE; do
             ALL_FILES+=("$FILE")
           done < <(find downloads -name "README.md" -print0 2>/dev/null)
 
-          # Then all data files
           while IFS= read -r -d '' FILE; do
             ALL_FILES+=("$FILE")
           done < <(find downloads -type f ! -name "README.md" -print0 2>/dev/null | sort -z)
