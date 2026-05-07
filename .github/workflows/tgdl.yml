@@ -63,11 +63,55 @@ jobs:
           PAGE_HTML=$(curl -sL --max-time 20 \
             -H "User-Agent: TelegramBot (like TwitterBot)" \
             "$TELEGRAM_LINK" 2>/dev/null || echo "")
-
-          RAW_URL=$(echo "$PAGE_HTML" | grep -oP 'https://cdn[0-9]*\.telesco\.pe/file/[^"]+' | head -1 || echo "")
-
+          
+          RAW_URL=""
+          
+          VIDEO_URL=$(echo "$PAGE_HTML" | grep -oP '(?<=content=")[^"]+\.(mp4|mov|avi|mkv)[^"]*' | head -1 || echo "")
+          if [ -n "$VIDEO_URL" ]; then
+            RAW_URL="$VIDEO_URL"
+            echo "✅ Found video URL via og:video"
+          fi
+          
           if [ -z "$RAW_URL" ]; then
-            RAW_URL=$(echo "$PAGE_HTML" | grep -oP '(?<=content=")[^"]+\.(mp4|mov|avi|mkv|pdf|zip|rar|7z|jpg|jpeg|png|gif|mp3|m4a|wav|flac)[^"]*' | head -1 || echo "")
+            AUDIO_URL=$(echo "$PAGE_HTML" | grep -oP '(?<=content=")[^"]+\.(mp3|m4a|ogg|flac|wav)[^"]*' | head -1 || echo "")
+            if [ -n "$AUDIO_URL" ]; then
+              RAW_URL="$AUDIO_URL"
+              echo "✅ Found audio URL"
+            fi
+          fi
+          
+          if [ -z "$RAW_URL" ]; then
+            DOC_URL=$(echo "$PAGE_HTML" | grep -oP '(?<=content=")[^"]+\.(pdf|zip|rar|7z)[^"]*' | head -1 || echo "")
+            if [ -n "$DOC_URL" ]; then
+              RAW_URL="$DOC_URL"
+              echo "✅ Found document URL"
+            fi
+          fi
+          
+          if [ -z "$RAW_URL" ]; then
+            CDN_URLS=$(echo "$PAGE_HTML" | grep -oP 'https://cdn[0-9]*\.telesco\.pe/file/[^"]+' || echo "")
+            while IFS= read -r CANDIDATE; do
+              [ -z "$CANDIDATE" ] && continue
+              CT=$(curl -sI --max-time 10 \
+                -H "User-Agent: Mozilla/5.0" \
+                -H "Referer: https://t.me/" \
+                "$CANDIDATE" 2>/dev/null | grep -i "content-type:" | head -1 | tr -d '\r')
+              if echo "$CT" | grep -qiE "video|audio|octet-stream|zip|pdf|rar|7z"; then
+                RAW_URL="$CANDIDATE"
+                echo "✅ Found non-image CDN URL via content-type check"
+                break
+              else
+                echo "⚠️  Skipping thumbnail/image CDN URL"
+              fi
+            done <<< "$CDN_URLS"
+          fi
+          
+          if [ -z "$RAW_URL" ]; then
+            IMAGE_URL=$(echo "$PAGE_HTML" | grep -oP '(?<=content=")[^"]+\.(jpg|jpeg|png|gif|webp)[^"]*' | head -1 || echo "")
+            if [ -n "$IMAGE_URL" ]; then
+              RAW_URL="$IMAGE_URL"
+              echo "⚠️  Only found image URL — post may be image-only"
+            fi
           fi
 
           if [ -z "$RAW_URL" ] || [ "$RAW_URL" = "null" ]; then
