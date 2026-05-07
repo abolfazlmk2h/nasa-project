@@ -107,21 +107,46 @@ jobs:
           fi
           
           if [ -z "$RAW_URL" ]; then
-            IMAGE_URL=$(echo "$PAGE_HTML" | grep -oP '(?<=content=")[^"]+\.(jpg|jpeg|png|gif|webp)[^"]*' | head -1 || echo "")
-            if [ -n "$IMAGE_URL" ]; then
-              RAW_URL="$IMAGE_URL"
-              echo "⚠️  Only found image URL — post may be image-only"
+            echo "⚠️  CDN scrape found no video — trying telegramdownloader.net API..."
+            RESPONSE=$(curl -s --max-time 30 -X POST \
+              -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+              -H "Content-Type: application/x-www-form-urlencoded" \
+              -d "telegram_link=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$TELEGRAM_LINK")" \
+              https://telegramdownloader.net/proxy.php 2>/dev/null || echo "FAILED")
+          
+            if [ "$RESPONSE" != "FAILED" ] && [ -n "$RESPONSE" ]; then
+              API_URL=$(echo "$RESPONSE" | jq -r '.data.data.link // empty' 2>/dev/null)
+              if [ -n "$API_URL" ] && [ "$API_URL" != "null" ]; then
+                CT=$(curl -sI --max-time 10 \
+                  -H "User-Agent: Mozilla/5.0" \
+                  "$API_URL" 2>/dev/null | grep -i "content-type:" | head -1 | tr -d '\r')
+                if echo "$CT" | grep -qiE "video|audio|octet-stream|zip|pdf|rar|7z|mp4"; then
+                  RAW_URL="$API_URL"
+                  FILE_NAME=$(echo "$RESPONSE" | jq -r '.data.data.file_name // empty' 2>/dev/null)
+                  echo "✅ telegramdownloader.net returned a valid video URL"
+                else
+                  echo "⚠️  telegramdownloader.net also returned an image, skipping"
+                fi
+              fi
             fi
           fi
-
-          if [ -z "$RAW_URL" ] || [ "$RAW_URL" = "null" ]; then
-            echo "❌ ERROR: Could not resolve a download link from: $TELEGRAM_LINK"
-            echo ""
-            echo "Troubleshooting tips:"
-            echo "  • Make sure the post/channel is PUBLIC"
-            echo "  • Use the direct post link format: https://t.me/channelname/123"
-            echo "  • Private channels are not supported"
-            exit 1
+          
+          if [ -z "$RAW_URL" ]; then
+            echo "⚠️  All methods failed — trying tgsave.com..."
+            RESPONSE2=$(curl -s --max-time 30 -X POST \
+              -H "User-Agent: Mozilla/5.0" \
+              -H "Content-Type: application/json" \
+              -d "{\"url\":\"$TELEGRAM_LINK\"}" \
+              https://api.tgsave.com/download 2>/dev/null || echo "FAILED")
+          
+            if [ "$RESPONSE2" != "FAILED" ] && [ -n "$RESPONSE2" ]; then
+              API_URL2=$(echo "$RESPONSE2" | jq -r '.url // .link // .download_url // empty' 2>/dev/null)
+              if [ -n "$API_URL2" ] && [ "$API_URL2" != "null" ]; then
+                RAW_URL="$API_URL2"
+                FILE_NAME=$(echo "$RESPONSE2" | jq -r '.filename // .file_name // .name // empty' 2>/dev/null)
+                echo "✅ tgsave.com returned a URL"
+              fi
+            fi
           fi
 
           CONTENT_TYPE=$(curl -sI --max-time 10 \
